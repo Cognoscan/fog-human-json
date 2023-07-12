@@ -86,10 +86,10 @@ pub fn json_to_fog(val: &JsonValue) -> Result<FogValue, DecodeError> {
         },
         JsonValue::String(s) => {
             if let Some(s) = s.strip_prefix(FOG_PREFIX) {
-                let (ty, val) = s.split_once(':').ok_or(DecodeError::BadFogType)?;
-                let val = val.trim();
+                let (ty, untrimmed_val) = s.split_once(':').ok_or(DecodeError::BadFogType)?;
+                let val = untrimmed_val.trim();
                 match ty {
-                    "Str" => FogValue::Str(val.to_owned()),
+                    "Str" => FogValue::Str(untrimmed_val.to_owned()),
                     "F32" => {
                         let f = val.parse::<f32>().map_err(|_| DecodeError::InvalidFloat)?;
                         FogValue::F32(f)
