@@ -1,13 +1,16 @@
+use fog_crypto::identity::{Identity, IdentityKey};
+use fog_pack::document::{Document, NewDocument};
+
 use super::*;
 
-/// Convert a [Document][fog_pack::document::Document] into a JSON Value.
+/// Convert a [Document] into a JSON Value.
 ///
 /// The resulting JSON value will be an Object with at least a "data" key present, containing the 
 /// data from the Document. Optional key-value pairs are:
 ///
 /// - "schema": A fog-pack Hash of the schema used by the document.
 /// - "signer": A fog-pack Identity that signed the document.
-pub fn doc_to_json(doc: &fog_pack::document::Document) -> JsonValue {
+pub fn doc_to_json(doc: &Document) -> JsonValue {
     // Deserializing to a fog-pack ValueRef should never fail
     let data: FogValueRef = doc.deserialize().unwrap();
     let mut map: BTreeMap<&str, FogValueRef> = BTreeMap::new();
@@ -22,7 +25,40 @@ pub fn doc_to_json(doc: &fog_pack::document::Document) -> JsonValue {
     fogref_to_json(&doc)
 }
 
-/// Convert a JSON value into a [NewDocument][fog_pack::document::NewDocument].
+/// A [`NewDocument`] that may still require signing.
+pub enum MaybeDocument {
+    /// A completed [`NewDocument`]
+    NewDocument(NewDocument),
+    /// A [`NewDocument`] that must first be signed
+    SignDocument(SignDocument),
+}
+
+/// An almost completed [`NewDocument`]. Complete it by finding the appropriate 
+/// [`IdentityKey`][IdentityKey] and calling [`complete`][SignDocument::complete].
+pub struct SignDocument {
+    doc: NewDocument,
+    signer: Identity,
+}
+
+impl SignDocument {
+
+    /// Get the Identity that should sign this.
+    pub fn signer(&self) -> &Identity {
+        &self.signer
+    }
+
+    /// Attempt to sign the Document and complete it.
+    pub fn complete(self, key: &IdentityKey) -> Result<NewDocument, ObjectError> {
+        if key.id() != &self.signer {
+            Err(ObjectError::IncorrectIdentityKey(Box::new(self.signer)))
+        }
+        else {
+            Ok(self.doc.sign(key)?)
+        }
+    }
+}
+
+/// Convert a JSON value into a [`NewDocument`].
 ///
 /// The root JSON value should be an Object with at least a "data" key present. Optional key-value 
 /// pairs are:
@@ -31,7 +67,10 @@ pub fn doc_to_json(doc: &fog_pack::document::Document) -> JsonValue {
 /// - "signer": A fog-pack Identity to use for signing the document.
 /// - "compression": Overrides the default compression settings for the document. Can be Null or 
 ///     0-255.
-pub fn json_to_doc(json: &JsonValue, vault: Option<&impl fog_crypto::Vault>) -> Result<fog_pack::document::NewDocument, ObjectError> {
+///
+/// If signing is required, this returns a [`SignDocument`] in an enum, which must first be signed 
+/// before completion.
+pub fn json_to_doc(json: &JsonValue) -> Result<MaybeDocument, ObjectError> {
     let obj = json.as_object().ok_or(ObjectError::NotAnObject)?;
 
     // Make sure we only have fields we recognize
@@ -76,17 +115,14 @@ pub fn json_to_doc(json: &JsonValue, vault: Option<&impl fog_crypto::Vault>) -> 
     else { new_doc };
 
     // Check the optional signer field
-    let new_doc = if let Some(s) = obj.get("signer") {
+    if let Some(s) = obj.get("signer") {
         let s = json_to_fog(s).map_err(|e| ObjectError::Decode { key: "signer", src: e })?
             .as_identity()
             .ok_or(ObjectError::WrongDataType("signer"))?
             .to_owned();
-        let Some(vault) = vault else { return Err(ObjectError::NoVault) };
-        let Some((_, key)) = vault.find_id(s.clone()) else { return Err(ObjectError::MissingIdentityKey(s.into())) };
-        new_doc.sign(&key)?
+        Ok(MaybeDocument::SignDocument(SignDocument { doc: new_doc, signer: s }))
     }
     else {
-        new_doc
-    };
-    Ok(new_doc)
+        Ok(MaybeDocument::NewDocument(new_doc))
+    }
 }

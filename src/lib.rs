@@ -52,9 +52,98 @@
 //!     as the compression level.
 //!   - "data": The entry content. Must be present.
 //! 
-//! When going from JSON to a Document or Entry, if there's a "signer" specified, it 
-//! will attempt to pull a matching IdentityKey from a provided Vault and use that 
-//! to reproduce the signature. If it can't, then the conversion will fail.
+//! When going from JSON to a Document or Entry, if there's a "signer" specified, an intermediate 
+//! struct will be provided that must be signed by a 
+//! [`IdentityKey`][fog_crypto::identity::IdentityKey] that matches the signer.
+//!
+//! As an example, let's take a struct that looks the one below, put it into a document, and look 
+//! at the resulting JSON:
+//!
+//! ```
+//! # use std::collections::BTreeMap;
+//! # use fog_crypto::identity::IdentityKey;
+//! # use serde::{Serialize, Deserialize};
+//! use fog_pack::{types::*, schema::NoSchema};
+//! use fog_human_json::*;
+//!
+//! #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+//! struct Test {
+//!     boolean: bool,
+//!     int: i64,
+//!     float32: f32,
+//!     float64: f64,
+//!     #[serde(with = "serde_bytes")]
+//!     bin: Vec<u8>,
+//!     string: String,
+//!     array: Vec<u32>,
+//!     map: BTreeMap<String, u32>,
+//!     time: Timestamp,
+//!     hash: Hash,
+//!     id: Identity,
+//! }
+//! 
+//! // ... Fill it up with some data ...
+//! # let bin = vec![0u8,1,2,3,4];
+//! # let hash = Hash::new(&bin);
+//! # let mut map = BTreeMap::new();
+//! # map.insert(String::from("a"), 1u32);
+//! # map.insert(String::from("b"), 2u32);
+//! # map.insert(String::from("c"), 3u32);
+//! # let time = Timestamp::now().unwrap();
+//! #
+//! # let mut rng = rand::thread_rng();
+//! # let id_key = IdentityKey::new_temp(&mut rng);
+//! # let id = id_key.id().clone();
+//! #
+//! # let test = Test {
+//! #     boolean: false,
+//! #     int: -12345,
+//! #     float32: 0.0f32,
+//! #     float64: 0.0f64,
+//! #     bin,
+//! #     string: "hello".into(),
+//! #     array: vec![0,1,2,3,4],
+//! #     map,
+//! #     time,
+//! #     hash,
+//! #     id,
+//! # };
+//! #
+//! let test: Test = test;
+//!
+//! let doc = fog_pack::document::NewDocument::new(None, &test).unwrap();
+//! let doc = NoSchema::validate_new_doc(doc).unwrap();
+//!
+//! let json_val = doc_to_json(&doc);
+//! let json_raw = serde_json::to_string_pretty(&json_val).expect("JSON Value to raw string");
+//! ```
+//! 
+//! The resulting JSON could look something like:
+//!
+//! ```text
+//! {
+//!   "data": {
+//!     "array": [ 0, 1, 2, 3, 4 ],
+//!     "bin": "$fog-Bin:AAECAwQ",
+//!     "boolean": false,
+//!     "float32": "$fog-F32:0.0",
+//!     "float64": 0.0,
+//!     "hash": "$fog-Hash:R7KEBd4fxeYgDtoivjDUK97HwEcL7k7hm3qjPhZFEhzL",
+//!     "id": "$fog-Identity:T4MvqAy6RVR2J8efJzgQW9xN9Z8avJBFEmefuSnBMWQP",
+//!     "int": -12345,
+//!     "lock": "$fog-LockId:ME7DmA9ADSYE6sq8SRvQ2ncd1kosQZoZqG7XiCFX55Uz",
+//!     "map": {
+//!       "a": 1,
+//!       "b": 2,
+//!       "c": 3
+//!     },
+//!     "stream_id": "$fog-StreamId:U4sLqPrtAgzKbUVnr47PcgPT2Rq3D9kBqrvhZ9NvCTvq",
+//!     "string": "hello",
+//!     "time": "$fog-Time:2023-07-12T17:33:13.454466675Z"
+//!   }
+//! }
+//! ```
+//!
 
 use thiserror::Error;
 
@@ -69,13 +158,15 @@ mod enc;
 mod dec;
 mod doc;
 mod entry;
+mod query;
 
 use std::collections::BTreeMap;
 
 pub use enc::{fog_to_json, fogref_to_json};
 pub use dec::{json_to_fog, DecodeError};
-pub use doc::{doc_to_json, json_to_doc};
-pub use entry::{entry_to_json, json_to_entry};
+pub use doc::*;
+pub use entry::*;
+pub use query::*;
 
 /// An error that occurred while converting from JSON to a fog-pack object, like a Document or 
 /// Entry.
@@ -103,20 +194,93 @@ pub enum ObjectError {
     /// Couldn't form the final result for some fog-pack specific reason
     #[error("Failed to form the fog-pack result")]
     FogPack(#[from] fog_pack::error::Error),
-    /// Missing a key vault, which is needed to sign fog-pack objects
-    #[error("Signing was requested, but no key vault was provided to look up the signing key")]
-    NoVault,
-    /// The key vault was missing the IdentityKey needed for signing the object
-    #[error("Missing Identity Key for signing: {0}")]
-    MissingIdentityKey(Box<fog_pack::types::Identity>),
+    /// The provided key was incorrect
+    #[error("Incorrect Identity Key for signing, needed {0}")]
+    IncorrectIdentityKey(Box<fog_pack::types::Identity>),
 }
 
 
 #[cfg(test)]
 mod tests {
-    //use super::*;
+    use super::*;
+    use fog_crypto::{identity::IdentityKey, stream::StreamKey, lock::LockKey};
+    use fog_pack::{types::*, schema::NoSchema};
+    use serde::{Deserialize, Serialize};
 
     #[test]
-    fn it_works() {
+    fn back_and_forth() {
+
+        #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+        struct Test {
+            boolean: bool,
+            int: i64,
+            float32: f32,
+            float64: f64,
+            #[serde(with = "serde_bytes")]
+            bin: Vec<u8>,
+            string: String,
+            array: Vec<u32>,
+            map: BTreeMap<String, u32>,
+            time: Timestamp,
+            hash: Hash,
+            id: Identity,
+            stream_id: StreamId,
+            lock: LockId,
+            databox: DataLockbox
+        }
+
+        
+        let bin = vec![0u8,1,2,3,4];
+        let hash = Hash::new(&bin);
+        let mut map = BTreeMap::new();
+        map.insert(String::from("a"), 1u32);
+        map.insert(String::from("b"), 2u32);
+        map.insert(String::from("c"), 3u32);
+        let time = Timestamp::now().unwrap();
+
+        let mut rng = rand::thread_rng();
+        let id_key = IdentityKey::new_temp(&mut rng);
+        let id = id_key.id().clone();
+        let stream_key = StreamKey::new_temp(&mut rng);
+        let stream_id = stream_key.id().clone();
+        let lock_key = LockKey::new_temp(&mut rng);
+        let lock = lock_key.id().clone();
+        let databox = lock.encrypt_data(&mut rng, &[0u8, 1, 2, 3]);
+
+        let test = Test {
+            boolean: false,
+            int: -12345,
+            float32: 0.0f32,
+            float64: 0.0f64,
+            bin,
+            string: "hello".into(),
+            array: vec![0,1,2,3,4],
+            map,
+            time,
+            hash,
+            id,
+            stream_id,
+            lock,
+            databox,
+        };
+
+        let doc = fog_pack::document::NewDocument::new(None, &test).unwrap();
+        let doc = NoSchema::validate_new_doc(doc).unwrap();
+
+        let json_val = doc_to_json(&doc);
+        let json_raw = serde_json::to_string(&json_val).expect("JSON Value to raw string");
+        let parsed_json: JsonValue = serde_json::from_str(&json_raw).expect("Parsed JSON");
+        assert_eq!( json_val, parsed_json);
+
+        let parsed_doc = json_to_doc(&parsed_json).expect("JSON to document");
+        let MaybeDocument::NewDocument(parsed_doc) = parsed_doc else {
+            panic!("Document shouldn't have needed signing")
+        };
+        assert_eq!(parsed_doc.hash(), doc.hash());
+
+        let parsed_doc = NoSchema::validate_new_doc(parsed_doc).expect("Validated document");
+        let roundtrip_test: Test = parsed_doc.deserialize().expect("Deserialized correctly");
+
+        assert!(roundtrip_test == test);
     }
 }
