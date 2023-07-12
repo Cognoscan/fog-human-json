@@ -2,8 +2,15 @@
 name = "fog-human-json"
 version = "0.1.0"
 edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+authors = ["Scott Teal"]
+readme = "README.md"
+keywords = ["fog-pack", "json"]
+categories = [ "encoding" ]
+description = "Human-readable fog-pack data, through JSON."
+repository = "https://github.com/Cognoscan/fog-human-json"
+homepage = "https://github.com/Cognoscan/fog-human-json"
+documentation = "https://docs.rs/fog-human-json"
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 fog-pack = "0.2"
