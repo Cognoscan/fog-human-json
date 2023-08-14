@@ -1,6 +1,6 @@
 [package]
 name = "fog-human-json"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 authors = ["Scott Teal"]
 readme = "README.md"
@@ -13,8 +13,8 @@ documentation = "https://docs.rs/fog-human-json"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-fog-pack = "0.3"
-fog-crypto = "0.4"
+fog-pack = "0.4.2"
+fog-crypto = "0.4.3"
 serde_json = "1"
 base64 = "0.21"
 chrono = "0.4"
